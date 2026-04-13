@@ -236,21 +236,6 @@
 //   );
 // }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 //---------------------------------------new code with ui------------------------------
 
 import { useEffect, useRef, useState } from "react";
@@ -266,15 +251,43 @@ const PHASE = {
 const FLOW = [
   {
     type: "camera",
-    question: "Show me your Office area.",
+    question:
+      "Thanks for welcoming us into your office world! To get started, can you show me around your workspace? I’d love to see the tools and products you use, where you keep them, what’s always nearby, and how everything is arranged.",
     target: "Office Area",
-  }
+  },
+  {
+    type: "text",
+    question: "Which laptop brands do you use?",
+    options: ["HP", "Dell", "Lenovo", "Apple", "Other"],
+  },
+  {
+    type: "text",
+    question: "What tools do you regularly use in your office setup?",
+    options: [
+      "Laptop",
+      "External Monitor",
+      "Keyboard & Mouse",
+      "Headphones",
+      "Webcam",
+      "Other",
+    ],
+  },
+  {
+    type: "camera",
+    question:
+      "Please show it on the camera. How do you organize your products ?",
+    target: "Product Arrangement",
+  },
 ];
 
 export default function App() {
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const speakingRef = useRef(false);
+
+  const [liveMessage, setLiveMessage] = useState("");
+
+  const streamIntervalRef = useRef(null);
 
   const [phase, setPhase] = useState(PHASE.AGE);
   const [age, setAge] = useState("");
@@ -312,6 +325,55 @@ export default function App() {
     } else {
       setVoice();
       window.speechSynthesis.speak(speech);
+    }
+  };
+
+  const startRealtimeValidation = () => {
+    if (streamIntervalRef.current) return;
+
+    streamIntervalRef.current = setInterval(async () => {
+      if (busy) return;
+
+      const img = capture();
+
+      try {
+        const res = await fetch(`${BASE_URL}/analyze`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            image: img,
+            type: FLOW[step].target,
+          }),
+        });
+
+        const data = await res.json();
+
+        console.log("LIVE:", data);
+
+        // ✅ 👇 ADD IT HERE
+        setLiveMessage(data.message);
+
+        // ✅ when valid → stop + move next
+        if (data.status === "ok") {
+          clearInterval(streamIntervalRef.current);
+          streamIntervalRef.current = null;
+
+          speak(data.message, () => {
+            next();
+          });
+        }
+      } catch (err) {
+        console.log(err);
+      }
+    }, 1500);
+  };
+
+  const stopRealtimeValidation = () => {
+    if (streamIntervalRef.current) {
+      clearInterval(streamIntervalRef.current);
+      streamIntervalRef.current = null;
     }
   };
 
@@ -400,13 +462,13 @@ export default function App() {
       });
     } catch {}
 
-    speak(`You selected ${option}`, () => {
-      setBusy(false);
-      setStep((prev) => prev + 1);
-    });
+    // ❌ NO SPEAK HERE
+    setBusy(false);
+    setStep((prev) => prev + 1);
   };
 
   const next = () => {
+    stopRealtimeValidation(); // ✅ VERY IMPORTANT
     stopCamera();
     setStep((s) => s + 1);
   };
@@ -423,14 +485,11 @@ export default function App() {
     if (current.type === "camera") {
       speak(current.question, () => {
         startCamera().then(() => {
-          setTimeout(validateCamera, 1000);
+          startRealtimeValidation();
         });
       });
     }
 
-    if (current.type === "voice") {
-      speak(current.question);
-    }
   }, [step, started]);
 
   // ================= UI =================
@@ -520,7 +579,9 @@ export default function App() {
           />
         )}
 
-        {FLOW[step]?.type === "voice" && (
+        <p style={{ marginTop: "10px", color: "#000000" }}>{liveMessage}</p>
+
+        {(FLOW[step]?.type === "voice" || FLOW[step]?.type === "text") && (
           <div className="mcq-grid">
             {FLOW[step]?.options?.map((opt) => (
               <button
