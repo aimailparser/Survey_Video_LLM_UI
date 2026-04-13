@@ -5,12 +5,12 @@ const BASE_URL = process.env.REACT_APP_BASE_URL;
 
 // ─── Phases ───────────────────────────────────────────────────────────────────
 const PHASE = {
-  AGE: "age",
-  GENDER: "gender",
-  CONSENT: "consent",
+  AGE:        "age",
+  GENDER:     "gender",
+  CONSENT:    "consent",
   TERMINATED: "terminated",
-  SURVEY: "survey",
-  COMPLETE: "complete",
+  SURVEY:     "survey",
+  COMPLETE:   "complete",
 };
 
 let sessionTranscript = [];
@@ -58,238 +58,228 @@ const FLOW = [
 
 // ─── Voice state machine ──────────────────────────────────────────────────────
 const VS = {
-  IDLE: "idle",
-  SPEAKING_Q: "speaking_q", // AI typing/speaking the question
-  RECORDING_MAIN: "recording_main",
-  PROCESSING_MAIN: "processing_main",
-  SPEAKING_PROBE: "speaking_probe",
-  PROBE_READY: "probe_ready",
-  RECORDING_PROBE: "recording_probe",
+  IDLE:             "idle",
+  SPEAKING_Q:       "speaking_q",
+  RECORDING_MAIN:   "recording_main",
+  PROCESSING_MAIN:  "processing_main",
+  SPEAKING_PROBE:   "speaking_probe",
+  PROBE_READY:      "probe_ready",
+  RECORDING_PROBE:  "recording_probe",
   PROCESSING_PROBE: "processing_probe",
-  ACKNOWLEDGING: "acknowledging",
-  DONE: "done",
+  ACKNOWLEDGING:    "acknowledging",
+  DONE:             "done",
 };
 
-// ─── Typewriter hook ──────────────────────────────────────────────────────────
-// Returns displayed text that grows char by char at ~charDelay ms per char
-function useTypewriter(text, active, charDelay = 35) {
-  const [displayed, setDisplayed] = useState("");
-  const idxRef = useRef(0);
+// ─── ChatBubble ───────────────────────────────────────────────────────────────
+// States:
+//   loading=true           → animated dots (TTS is being fetched)
+//   typewriter=true        → text animates in char by char (audio playing)
+//   typing=true            → blinking cursor only (audio finished, cursor clearing)
+//   default                → plain committed text
+function ChatBubble({ role, text, loading = false, typewriter = false, typewriterDuration = 0, typing = false }) {
+  const isAI = role === "ai";
+  const [displayed, setDisplayed] = useState(typewriter ? "" : text);
 
   useEffect(() => {
-    if (!active) {
-      setDisplayed("");
-      idxRef.current = 0;
-      return;
-    }
+    if (!typewriter || !text) return;
     setDisplayed("");
-    idxRef.current = 0;
-    const interval = setInterval(() => {
-      idxRef.current++;
-      setDisplayed(text.slice(0, idxRef.current));
-      if (idxRef.current >= text.length) clearInterval(interval);
-    }, charDelay);
-    return () => clearInterval(interval);
-  }, [text, active]);
+    const chars = text.length;
+    // spread chars evenly across the audio duration (ms), min 30ms/char
+    const delay = typewriterDuration > 0
+      ? Math.max(Math.floor(typewriterDuration / chars), 25)
+      : 38;
+    let i = 0;
+    const iv = setInterval(() => {
+      i++;
+      setDisplayed(text.slice(0, i));
+      if (i >= chars) clearInterval(iv);
+    }, delay);
+    return () => clearInterval(iv);
+  }, [typewriter, text, typewriterDuration]);
 
-  return displayed;
-}
-
-// ─── ChatBubble component ─────────────────────────────────────────────────────
-function ChatBubble({ role, text, typing = false }) {
-  const isAI = role === "ai";
   return (
     <div className={`chat-row ${isAI ? "chat-row-ai" : "chat-row-user"}`}>
       {isAI && <div className="chat-avatar">AI</div>}
       <div className={`chat-bubble ${isAI ? "bubble-ai" : "bubble-user"}`}>
-        {text}
-        {typing && <span className="typing-cursor">▌</span>}
+        {loading ? (
+          <span className="dots-loader">
+            <span /><span /><span />
+          </span>
+        ) : typewriter ? (
+          <>
+            {displayed}
+            <span className="typing-cursor">▌</span>
+          </>
+        ) : (
+          <>
+            {text}
+            {typing && <span className="typing-cursor">▌</span>}
+          </>
+        )}
       </div>
       {!isAI && <div className="chat-avatar user-avatar">You</div>}
     </div>
   );
 }
 
+// ─── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
-  // ── Refs ──────────────────────────────────────────────────────────────────
-  const videoRef = useRef(null);
-  const streamRef = useRef(null);
-  const speakingRef = useRef(false);
+  // Refs
+  const videoRef          = useRef(null);
+  const streamRef         = useRef(null);
   const streamIntervalRef = useRef(null);
-  const mediaRecorderRef = useRef(null);
-  const audioChunksRef = useRef([]);
-  const probeQuestionRef = useRef("");
+  const mediaRecorderRef  = useRef(null);
+  const audioChunksRef    = useRef([]);
+  const audioRef          = useRef(null);   // current playing Audio object
+  const speakingRef       = useRef(false);  // true while TTS audio is playing
+  const probeQuestionRef  = useRef("");
   const mainTranscriptRef = useRef("");
-  const vsRef = useRef(VS.IDLE);
-  const lastHintRef = useRef("");
-  const hintCooldownRef = useRef(false);
-  const chatEndRef = useRef(null);
+  const vsRef             = useRef(VS.IDLE);
+  const lastHintRef       = useRef("");
+  const hintCooldownRef   = useRef(false);
+  const chatEndRef        = useRef(null);
 
-  // ── State ─────────────────────────────────────────────────────────────────
-  const [phase, setPhase] = useState(PHASE.AGE);
-  const [age, setAge] = useState("");
-  const [gender, setGender] = useState("");
-  const [step, setStep] = useState(0);
-  const [started, setStarted] = useState(false);
-  const [vs, setVs] = useState(VS.IDLE);
-  const [cameraStatus, setCameraStatus] = useState("scanning");
-  const [transcriptDL, setTranscriptDL] = useState(null);
+  // State
+  const [phase,         setPhase]        = useState(PHASE.AGE);
+  const [age,           setAge]          = useState("");
+  const [gender,        setGender]       = useState("");
+  const [step,          setStep]         = useState(0);
+  const [started,       setStarted]      = useState(false);
+  const [vs,            setVs]           = useState(VS.IDLE);
+  const [cameraStatus,  setCameraStatus] = useState("scanning");
+  const [transcriptDL,  setTranscriptDL] = useState(null);
+  // chatMessages: [{ role, text, id, typing? }]
+  const [chatMessages,  setChatMessages] = useState([]);
+  const [cameraDisplayText, setCameraDisplayText] = useState(""); // typewriter for camera q
+  const [cameraTyping,      setCameraTyping]      = useState(false);  // cursor visible
+  const cameraTypewriterRef = useRef(null); // interval ref for camera typewriter
 
-  // Chat messages: [{ role: "ai"|"user", text, id }]
-  const [chatMessages, setChatMessages] = useState([]);
-  // Text currently being typed by AI (for typewriter)
-  const [typingText, setTypingText] = useState("");
-  const [isTyping, setIsTyping] = useState(false);
+  // Keep vsRef synced
+  useEffect(() => { vsRef.current = vs; }, [vs]);
 
-  useEffect(() => {
-    vsRef.current = vs;
-  }, [vs]);
-
-  // Auto-scroll chat to bottom
+  // Auto-scroll chat
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [chatMessages, typingText]);
+  }, [chatMessages]);
 
-  // ─── VOICE HELPERS ───────────────────────────────────────────────────────
-  //
-  // Mobile Chrome / iOS Safari quirks we handle:
-  //   1. getVoices() returns [] on first call — must wait for onvoiceschanged
-  //      BUT onvoiceschanged never fires on iOS if voices were already loaded.
-  //      Fix: try immediately, fall back to event, fall back to timeout.
-  //   2. speechSynthesis pauses after ~15 s on Android Chrome (background tab).
-  //      Fix: setInterval keepalive that calls resume() every 10 s.
-  //   3. onend never fires on some Android Chrome versions.
-  //      Fix: estimate duration from word count and fire cb ourselves if
-  //      onend hasn't fired within that window.
-  //   4. Must call speechSynthesis.cancel() before speak() or it queues.
+  // ─── TTS via OpenAI ─────────────────────────────────────────────────────────
+  // fetchAudio  — downloads the mp3 blob, returns it (no playback yet)
+  // playBlob    — plays a pre-fetched blob, calls onDone when finished
 
-  const keepaliveRef = useRef(null);
+  // speakAndType — fetches audio FIRST (silent), then shows bubble + plays
+  //               simultaneously so text and voice are in sync
 
-  const startKeepalive = () => {
-    if (keepaliveRef.current) return;
-    keepaliveRef.current = setInterval(() => {
-      if (window.speechSynthesis.speaking) window.speechSynthesis.resume();
-    }, 10000);
-  };
-
-  const stopKeepalive = () => {
-    clearInterval(keepaliveRef.current);
-    keepaliveRef.current = null;
-  };
-
-  // Pick best available voice — prefers natural-sounding female voices
-  const pickVoice = () => {
-    const voices = window.speechSynthesis.getVoices();
-    return (
-      voices.find((v) => v.name === "Samantha") ||
-      voices.find((v) => v.name.includes("Google UK English Female")) ||
-      voices.find((v) => /female/i.test(v.name)) ||
-      voices.find((v) => v.name.includes("Zira")) ||
-      voices.find((v) => v.lang.startsWith("en")) ||
-      voices[0] ||
-      null
-    );
-  };
-
-  // Core speak — calls cb when done (or after estimated duration as fallback)
-  const doSpeak = useCallback((text, onDone) => {
-    window.speechSynthesis.cancel();
-    speakingRef.current = true;
-    startKeepalive();
-
-    const utter = new SpeechSynthesisUtterance(text);
-    utter.rate = 0.92;
-    utter.pitch = 1;
-
-    const assignVoiceAndSpeak = () => {
-      const v = pickVoice();
-      if (v) utter.voice = v;
-
-      // Fallback timer — fires cb if onend never comes
-      // Estimate: ~130 words/min at rate 0.92 → ~145ms per word
-      const wordCount = text.trim().split(/\s+/).length;
-      const estimatedMs = Math.max(wordCount * 145 + 800, 2000);
-      let cbFired = false;
-
-      const fallback = setTimeout(() => {
-        if (!cbFired) {
-          cbFired = true;
-          speakingRef.current = false;
-          stopKeepalive();
-          onDone && onDone();
-        }
-      }, estimatedMs);
-
-      utter.onend = () => {
-        if (!cbFired) {
-          cbFired = true;
-          clearTimeout(fallback);
-          speakingRef.current = false;
-          stopKeepalive();
-          onDone && onDone();
-        }
-      };
-
-      utter.onerror = () => {
-        if (!cbFired) {
-          cbFired = true;
-          clearTimeout(fallback);
-          speakingRef.current = false;
-          stopKeepalive();
-          onDone && onDone();
-        }
-      };
-
-      window.speechSynthesis.speak(utter);
-    };
-
-    // If voices already loaded → go immediately
-    if (window.speechSynthesis.getVoices().length > 0) {
-      assignVoiceAndSpeak();
-    } else {
-      // Wait for voices, but also set a hard timeout in case event never fires
-      const voiceTimeout = setTimeout(assignVoiceAndSpeak, 500);
-      window.speechSynthesis.onvoiceschanged = () => {
-        clearTimeout(voiceTimeout);
-        window.speechSynthesis.onvoiceschanged = null;
-        assignVoiceAndSpeak();
-      };
+  const stopAudio = () => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.onended = null;
+      audioRef.current.onerror = null;
+      audioRef.current = null;
     }
+    speakingRef.current = false;
+  };
+
+  const fetchAudio = useCallback(async (text) => {
+    const res = await fetch(`${BASE_URL}/speak`, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ text }),
+    });
+    if (!res.ok) throw new Error(`TTS ${res.status}`);
+    return res.blob();
   }, []);
 
-  // speakAndType — speaks + shows typewriter bubble, commits on done
-  const speakAndType = useCallback(
-    (text, cb) => {
-      setTypingText(text);
-      setIsTyping(true);
+  const playBlob = useCallback((blob, onDone) => {
+    stopAudio();
+    speakingRef.current = true;
+    const url   = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    audioRef.current = audio;
 
-      doSpeak(text, () => {
-        setIsTyping(false);
-        setTypingText("");
-        setChatMessages((prev) => [
-          ...prev,
-          { role: "ai", text, id: Date.now() },
-        ]);
+    const finish = () => {
+      URL.revokeObjectURL(url);
+      speakingRef.current = false;
+      audioRef.current = null;
+      onDone && onDone();
+    };
+    audio.onended = finish;
+    audio.onerror = finish;
+    audio.play().catch(finish);
+  }, []);
+
+  // speak — fetch then play, no bubble (camera hints / confirmations)
+  const speak = useCallback((text, cb) => {
+    fetchAudio(text)
+      .then((blob) => playBlob(blob, cb))
+      .catch((err) => {
+        console.error("TTS error:", err);
         cb && cb();
       });
-    },
-    [doSpeak],
-  );
+  }, [fetchAudio, playBlob]);
 
-  // speak — silent speak for camera hints (no typewriter)
-  const speak = useCallback(
-    (text, cb) => {
-      doSpeak(text, cb);
-    },
-    [doSpeak],
-  );
+  // speakAndType — 3-phase:
+  //   Phase 1: show loading dots bubble immediately while TTS fetches
+  //   Phase 2: swap to typewriter bubble + start audio simultaneously
+  //   Phase 3: mark done (cursor gone) when audio ends
+  const speakAndType = useCallback((text, cb) => {
+    const id = Date.now();
 
-  // Add a user bubble to chat
+    // Phase 1: loading dots appear immediately
+    setChatMessages((prev) => [...prev, { role: "ai", text, id, loading: true }]);
+
+    fetchAudio(text)
+      .then((blob) => {
+        // Measure duration via a temporary Audio probe
+        const probeUrl = URL.createObjectURL(blob);
+        const probeAudio = new Audio();
+        probeAudio.preload = "metadata";
+
+        const startPlayback = (durationMs) => {
+          URL.revokeObjectURL(probeUrl);
+          // Phase 2: swap loading → typewriter bubble + start audio together
+          setChatMessages((prev) =>
+            prev.map((m) =>
+              m.id === id
+                ? { ...m, loading: false, typewriter: true, typewriterDuration: durationMs }
+                : m
+            )
+          );
+          playBlob(blob, () => {
+            // Phase 3: audio done — remove cursor
+            setChatMessages((prev) =>
+              prev.map((m) =>
+                m.id === id ? { ...m, typewriter: false, typing: false } : m
+              )
+            );
+            cb && cb();
+          });
+        };
+
+        probeAudio.addEventListener("loadedmetadata", () => {
+          startPlayback((probeAudio.duration || 3) * 1000);
+        }, { once: true });
+
+        probeAudio.addEventListener("error", () => {
+          // Can't get duration — use fallback of 3s, still plays fine
+          startPlayback(3000);
+        }, { once: true });
+
+        probeAudio.src = probeUrl;
+      })
+      .catch((err) => {
+        console.error("TTS error:", err);
+        // Show text even if audio fails
+        setChatMessages((prev) =>
+          prev.map((m) =>
+            m.id === id ? { ...m, loading: false, typewriter: false } : m
+          )
+        );
+        cb && cb();
+      });
+  }, [fetchAudio, playBlob]);
+
   const addUserBubble = (text) => {
-    setChatMessages((prev) => [
-      ...prev,
-      { role: "user", text, id: Date.now() },
-    ]);
+    setChatMessages((prev) => [...prev, { role: "user", text, id: Date.now() }]);
   };
 
   // ─── CAMERA ──────────────────────────────────────────────────────────────
@@ -300,9 +290,7 @@ export default function App() {
       });
       streamRef.current = stream;
       if (videoRef.current) videoRef.current.srcObject = stream;
-    } catch (err) {
-      console.error("Camera error:", err);
-    }
+    } catch (err) { console.error("Camera error:", err); }
   };
 
   const stopCamera = () => {
@@ -313,13 +301,11 @@ export default function App() {
 
   const capture = () => {
     const canvas = document.createElement("canvas");
-    canvas.width = 320;
-    canvas.height = 240;
+    canvas.width = 320; canvas.height = 240;
     canvas.getContext("2d").drawImage(videoRef.current, 0, 0, 320, 240);
     return canvas.toDataURL("image/jpeg");
   };
 
-  // ─── REALTIME CAMERA VALIDATION ──────────────────────────────────────────
   const startRealtimeValidation = (currentStep) => {
     if (streamIntervalRef.current) return;
     let retryCount = 0;
@@ -329,11 +315,11 @@ export default function App() {
       try {
         const flowItem = FLOW[currentStep];
         const res = await fetch(`${BASE_URL}/analyze`, {
-          method: "POST",
+          method:  "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            image: capture(),
-            type: flowItem.target,
+          body:    JSON.stringify({
+            image:    capture(),
+            type:     flowItem.target,
             question: flowItem.question,
           }),
         });
@@ -345,9 +331,8 @@ export default function App() {
           setCameraStatus("ok");
           sessionTranscript.push({
             question: flowItem.question,
-            answer: data.transcriptAnswer,
+            answer:   data.transcriptAnswer,
           });
-
           const confirmations = [
             "Perfect, got it! That's exactly what I needed to see.",
             "Great, I can see everything clearly now — thanks!",
@@ -355,30 +340,22 @@ export default function App() {
             "Brilliant, I've got a good picture of that now.",
             "Oh nice, yeah I can see that clearly — perfect!",
           ];
-          const confirm =
-            confirmations[Math.floor(Math.random() * confirmations.length)];
-          speak(confirm, () => next());
+          speak(
+            confirmations[Math.floor(Math.random() * confirmations.length)],
+            () => next()
+          );
           return;
         }
 
         retryCount++;
-        if (retryCount === 1) {
-          speak(randomPhrase());
-          return;
-        }
+        if (retryCount === 1) { speak(randomPhrase()); return; }
 
-        const hint =
-          data.hint ||
-          "Could you adjust the camera a little so I can see better?";
+        const hint = data.hint || "Could you adjust the camera a little so I can see better?";
         if (hint === lastHintRef.current) return;
-        lastHintRef.current = hint;
+        lastHintRef.current     = hint;
         hintCooldownRef.current = true;
-        speak(hint, () => {
-          hintCooldownRef.current = false;
-        });
-      } catch (err) {
-        console.error(err);
-      }
+        speak(hint, () => { hintCooldownRef.current = false; });
+      } catch (err) { console.error(err); }
     }, 2500);
   };
 
@@ -387,7 +364,7 @@ export default function App() {
     streamIntervalRef.current = null;
   };
 
-  // ─── AUDIO RECORDING ─────────────────────────────────────────────────────
+  // ─── RECORDING ───────────────────────────────────────────────────────────
   const startRecording = async (onStop) => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -402,9 +379,7 @@ export default function App() {
         onStop(new Blob(audioChunksRef.current, { type: "audio/webm" }));
       };
       recorder.start();
-    } catch (err) {
-      console.error("Mic error:", err);
-    }
+    } catch (err) { console.error("Mic error:", err); }
   };
 
   const stopRecording = () => {
@@ -414,61 +389,53 @@ export default function App() {
 
   const transcribeBlob = async (blob, questionCtx) => {
     const fd = new FormData();
-    fd.append("audio", blob, "answer.webm");
+    fd.append("audio",    blob, "answer.webm");
     fd.append("question", questionCtx || "");
-    const res = await fetch(`${BASE_URL}/transcribe`, {
-      method: "POST",
-      body: fd,
-    });
+    const res = await fetch(`${BASE_URL}/transcribe`, { method: "POST", body: fd });
     const { transcript } = await res.json();
     return transcript || "";
   };
 
-  // ─── SINGLE MIC BUTTON ───────────────────────────────────────────────────
+  // ─── MIC TAP ─────────────────────────────────────────────────────────────
   const handleMicTap = () => {
     const state = vsRef.current;
 
+    // Stop recording
     if (state === VS.RECORDING_MAIN || state === VS.RECORDING_PROBE) {
       stopRecording();
       return;
     }
 
+    // Start probe recording
     if (state === VS.PROBE_READY) {
       setVs(VS.RECORDING_PROBE);
       startRecording(async (blob) => {
         setVs(VS.PROCESSING_PROBE);
         try {
-          const probeAnswer = await transcribeBlob(
-            blob,
-            probeQuestionRef.current,
-          );
+          const probeAnswer = await transcribeBlob(blob, probeQuestionRef.current);
           addUserBubble(probeAnswer);
-          sessionTranscript.push({
-            question: probeQuestionRef.current,
-            answer: probeAnswer,
-          });
+          sessionTranscript.push({ question: probeQuestionRef.current, answer: probeAnswer });
 
+          // Save voice Q&A to server
           await fetch(`${BASE_URL}/save-transcript`, {
-            method: "POST",
+            method:  "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
+            body:    JSON.stringify({
               entries: [
-                {
-                  question: FLOW[step].question,
-                  answer: mainTranscriptRef.current,
-                },
+                { question: FLOW[step].question,      answer: mainTranscriptRef.current },
                 { question: probeQuestionRef.current, answer: probeAnswer },
               ],
             }),
           }).catch(() => {});
 
+          // Get acknowledgement and speak it
           setVs(VS.ACKNOWLEDGING);
           let ack = "Yeah, that totally makes sense. Okay, moving on!";
           try {
             const ackRes = await fetch(`${BASE_URL}/acknowledge`, {
-              method: "POST",
+              method:  "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
+              body:    JSON.stringify({
                 probeQuestion: probeQuestionRef.current,
                 probeAnswer,
               }),
@@ -481,11 +448,12 @@ export default function App() {
             setVs(VS.DONE);
             setTimeout(() => {
               setVs(VS.IDLE);
-              probeQuestionRef.current = "";
+              probeQuestionRef.current  = "";
               mainTranscriptRef.current = "";
               next();
             }, 400);
           });
+
         } catch (err) {
           console.error(err);
           setVs(VS.PROBE_READY);
@@ -494,32 +462,47 @@ export default function App() {
       return;
     }
 
+    // Start main recording
     if (state === VS.IDLE) {
       setVs(VS.RECORDING_MAIN);
       startRecording(async (blob) => {
         setVs(VS.PROCESSING_MAIN);
         try {
+          // Transcribe answer
           const transcript = await transcribeBlob(blob, FLOW[step].question);
           mainTranscriptRef.current = transcript;
           addUserBubble(transcript);
-          sessionTranscript.push({
-            question: FLOW[step].question,
-            answer: transcript,
-          });
+          sessionTranscript.push({ question: FLOW[step].question, answer: transcript });
 
+          // Fetch probe text AND pre-fetch its TTS audio simultaneously
           const probeRes = await fetch(`${BASE_URL}/probe`, {
-            method: "POST",
+            method:  "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              question: FLOW[step].question,
-              answer: transcript,
-            }),
+            body:    JSON.stringify({ question: FLOW[step].question, answer: transcript }),
           });
           const { probe } = await probeRes.json();
           probeQuestionRef.current = probe;
 
+          // Fetch probe audio silently first, then show bubble + play together
           setVs(VS.SPEAKING_PROBE);
-          speakAndType(probe, () => setVs(VS.PROBE_READY));
+          fetchAudio(probe)
+            .then((audioBlob) => {
+              const id = Date.now();
+              setChatMessages((prev) => [...prev, { role: "ai", text: probe, id, typing: true }]);
+              playBlob(audioBlob, () => {
+                setChatMessages((prev) =>
+                  prev.map((m) => (m.id === id ? { ...m, typing: false } : m))
+                );
+                setVs(VS.PROBE_READY);
+              });
+            })
+            .catch(() => {
+              // fallback: show bubble without audio
+              const id = Date.now();
+              setChatMessages((prev) => [...prev, { role: "ai", text: probe, id, typing: false }]);
+              setVs(VS.PROBE_READY);
+            });
+
         } catch (err) {
           console.error(err);
           setVs(VS.IDLE);
@@ -528,39 +511,39 @@ export default function App() {
     }
   };
 
-  // ─── NEXT ─────────────────────────────────────────────────────────────────
+  // ─── NEXT ────────────────────────────────────────────────────────────────
   const next = () => {
     stopRealtimeValidation();
     stopCamera();
     setCameraStatus("scanning");
-    lastHintRef.current = "";
+    setCameraTyping(false);
+    setCameraDisplayText("");
+    lastHintRef.current     = "";
     hintCooldownRef.current = false;
     setStep((s) => s + 1);
   };
 
-  // ─── FLOW ENGINE ──────────────────────────────────────────────────────────
+  // ─── FLOW ENGINE ─────────────────────────────────────────────────────────
   useEffect(() => {
     if (!started) return;
     const current = FLOW[step];
 
     if (!current) {
+      // Survey done
       fetch(`${BASE_URL}/save-transcript`, {
-        method: "POST",
+        method:  "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+        body:    JSON.stringify({
           age,
           gender,
-          transcript: sessionTranscript,
+          transcript:  sessionTranscript,
           completedAt: new Date().toISOString(),
         }),
       })
         .then((r) => r.json())
         .then((data) => {
           if (data.txtContent) {
-            setTranscriptDL({
-              content: data.txtContent,
-              filename: data.filename,
-            });
+            setTranscriptDL({ content: data.txtContent, filename: data.filename });
           }
         })
         .catch(console.error);
@@ -573,60 +556,121 @@ export default function App() {
     if (current.type === "voice") {
       setVs(VS.SPEAKING_Q);
       setChatMessages([]);
-      probeQuestionRef.current = "";
+      probeQuestionRef.current  = "";
       mainTranscriptRef.current = "";
+      // Speak question — only move to IDLE when audio FINISHES
       speakAndType(current.question, () => setVs(VS.IDLE));
     }
 
     if (current.type === "camera") {
       setCameraStatus("scanning");
-      speak(current.question, () =>
-        startCamera().then(() => startRealtimeValidation(step)),
-      );
+      setCameraDisplayText("");
+      // Clear any previous typewriter interval
+      if (cameraTypewriterRef.current) {
+        clearInterval(cameraTypewriterRef.current);
+        cameraTypewriterRef.current = null;
+      }
+
+      // Phase 1: show loading dots → fetch audio
+      setCameraDisplayText("__loading__");
+
+      fetchAudio(current.question)
+        .then((blob) => {
+          // Probe duration
+          const probeUrl = URL.createObjectURL(blob);
+          const probeAudio = new Audio();
+          probeAudio.preload = "metadata";
+
+          const startCameraTypewriter = (durationMs) => {
+            URL.revokeObjectURL(probeUrl);
+            const text  = current.question;
+            const chars = text.length;
+            const delay = Math.max(Math.floor(durationMs / chars), 25);
+            let i = 0;
+
+            // Phase 2: start typewriter + audio simultaneously
+            setCameraDisplayText("");
+            playBlob(blob, () => {
+              // Phase 3: ensure full text shown, start camera
+              setCameraDisplayText(text);
+              setCameraTyping(false);
+              if (cameraTypewriterRef.current) {
+                clearInterval(cameraTypewriterRef.current);
+                cameraTypewriterRef.current = null;
+              }
+              startCamera().then(() => startRealtimeValidation(step));
+            });
+
+            setCameraTyping(true);
+            cameraTypewriterRef.current = setInterval(() => {
+              i++;
+              setCameraDisplayText(text.slice(0, i));
+              if (i >= chars) {
+                clearInterval(cameraTypewriterRef.current);
+                cameraTypewriterRef.current = null;
+                setCameraTyping(false);
+              }
+            }, delay);
+          };
+
+          probeAudio.addEventListener("loadedmetadata", () => {
+            startCameraTypewriter((probeAudio.duration || 3) * 1000);
+          }, { once: true });
+
+          probeAudio.addEventListener("error", () => {
+            URL.revokeObjectURL(probeUrl);
+            startCameraTypewriter(3000);
+          }, { once: true });
+
+          probeAudio.src = probeUrl;
+        })
+        .catch(() => {
+          // Audio failed — show text immediately, start camera
+          setCameraDisplayText(current.question);
+          startCamera().then(() => startRealtimeValidation(step));
+        });
     }
   }, [step, started]);
 
-  // ─── MIC BUTTON LABEL ────────────────────────────────────────────────────
+  // ─── MIC LABEL ───────────────────────────────────────────────────────────
   const micLabel = () => {
     switch (vs) {
-      case VS.SPEAKING_Q:
-        return { icon: "🔊", text: "Listening…", active: false };
-      case VS.IDLE:
-        return { icon: "🎙️", text: "Tap to Answer", active: false };
-      case VS.RECORDING_MAIN:
-        return { icon: "⏹️", text: "Tap to Stop", active: true };
-      case VS.PROCESSING_MAIN:
-        return { icon: "⏳", text: "Thinking…", active: false };
-      case VS.SPEAKING_PROBE:
-        return { icon: "🔊", text: "Listening…", active: false };
-      case VS.PROBE_READY:
-        return { icon: "🎙️", text: "Tap to Answer", active: false };
-      case VS.RECORDING_PROBE:
-        return { icon: "⏹️", text: "Tap to Stop", active: true };
-      case VS.PROCESSING_PROBE:
-        return { icon: "⏳", text: "Saving…", active: false };
-      case VS.ACKNOWLEDGING:
-        return { icon: "🔊", text: "Listening…", active: false };
-      case VS.DONE:
-        return { icon: "✅", text: "Done!", active: false };
-      default:
-        return { icon: "🎙️", text: "Tap to Answer", active: false };
+      case VS.SPEAKING_Q:       return { icon: "🔊", text: "Listening…",   active: false };
+      case VS.IDLE:             return { icon: "🎙️", text: "Tap to Answer", active: false };
+      case VS.RECORDING_MAIN:   return { icon: "⏹️", text: "Tap to Stop",   active: true  };
+      case VS.PROCESSING_MAIN:  return { icon: "⏳", text: "Thinking…",     active: false };
+      case VS.SPEAKING_PROBE:   return { icon: "🔊", text: "Listening…",    active: false };
+      case VS.PROBE_READY:      return { icon: "🎙️", text: "Tap to Answer", active: false };
+      case VS.RECORDING_PROBE:  return { icon: "⏹️", text: "Tap to Stop",   active: true  };
+      case VS.PROCESSING_PROBE: return { icon: "⏳", text: "Saving…",       active: false };
+      case VS.ACKNOWLEDGING:    return { icon: "🔊", text: "Listening…",    active: false };
+      case VS.DONE:             return { icon: "✅", text: "Done!",         active: false };
+      default:                  return { icon: "🎙️", text: "Tap to Answer", active: false };
     }
   };
 
   const micDisabled =
-    vs === VS.SPEAKING_Q ||
-    vs === VS.PROCESSING_MAIN ||
-    vs === VS.SPEAKING_PROBE ||
+    vs === VS.SPEAKING_Q       ||
+    vs === VS.PROCESSING_MAIN  ||
+    vs === VS.SPEAKING_PROBE   ||
     vs === VS.PROCESSING_PROBE ||
-    vs === VS.ACKNOWLEDGING ||
+    vs === VS.ACKNOWLEDGING    ||
     vs === VS.DONE;
 
-  // ─────────────────────────────────────────────────────────────────────────
-  //  SCREENS
-  // ─────────────────────────────────────────────────────────────────────────
+  // ─── DOWNLOAD ────────────────────────────────────────────────────────────
+  const handleDownload = () => {
+    if (!transcriptDL) return;
+    const blob = new Blob([transcriptDL.content], { type: "text/plain;charset=utf-8" });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement("a");
+    a.href     = url;
+    a.download = transcriptDL.filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
-  // ── AGE ──
+  // ─── RENDER ──────────────────────────────────────────────────────────────
+
   if (phase === PHASE.AGE) {
     return (
       <div className="page-bg">
@@ -640,11 +684,7 @@ export default function App() {
             type="number"
           />
           <div className="btn-row">
-            <button
-              className="next-btn"
-              disabled={!age}
-              onClick={() => setPhase(PHASE.GENDER)}
-            >
+            <button className="next-btn" disabled={!age} onClick={() => setPhase(PHASE.GENDER)}>
               Next
             </button>
           </div>
@@ -653,7 +693,6 @@ export default function App() {
     );
   }
 
-  // ── GENDER ──
   if (phase === PHASE.GENDER) {
     return (
       <div className="page-bg">
@@ -661,14 +700,10 @@ export default function App() {
           <h2 className="title">What is your gender?</h2>
           <div className="options-row">
             {["Male", "Female", "Other"].map((g) => (
-              <button
-                key={g}
-                className="option-btn"
-                onClick={() => {
-                  setGender(g);
-                  setPhase(PHASE.CONSENT);
-                }}
-              >
+              <button key={g} className="option-btn" onClick={() => {
+                setGender(g);
+                setPhase(PHASE.CONSENT);
+              }}>
                 {g}
               </button>
             ))}
@@ -678,7 +713,6 @@ export default function App() {
     );
   }
 
-  // ── PII CONSENT ──
   if (phase === PHASE.CONSENT) {
     return (
       <div className="page-bg">
@@ -686,9 +720,8 @@ export default function App() {
           <div className="consent-icon">🔒</div>
           <h2 className="title">Your Privacy Matters</h2>
           <p className="consent-body">
-            To continue with this study, we need to collect some personal
-            information including your responses, voice recordings, and camera
-            footage of your workspace.
+            To continue with this study, we need to collect some personal information
+            including your responses, voice recordings, and camera footage of your workspace.
           </p>
           <ul className="consent-list">
             <li>Your data will only be used for research purposes</li>
@@ -702,31 +735,17 @@ export default function App() {
             <button
               className="consent-agree"
               onClick={() => {
-                // Unlock audio context on iOS/Android — must happen inside a user gesture
-                window.speechSynthesis.cancel();
-                window.speechSynthesis.resume();
-                // Fire a silent 0-length utterance to warm up the engine on iOS
-                const warmup = new SpeechSynthesisUtterance(" ");
-                warmup.volume = 0;
-                window.speechSynthesis.speak(warmup);
-
                 sessionTranscript = [];
-                sessionTranscript.push({ question: "Age", answer: age });
-                sessionTranscript.push({ question: "Gender", answer: gender });
-                sessionTranscript.push({
-                  question: "PII Consent",
-                  answer: "Agreed",
-                });
+                sessionTranscript.push({ question: "Age",        answer: age    });
+                sessionTranscript.push({ question: "Gender",     answer: gender });
+                sessionTranscript.push({ question: "PII Consent",answer: "Agreed" });
                 setStarted(true);
                 setPhase(PHASE.SURVEY);
               }}
             >
               I Agree
             </button>
-            <button
-              className="consent-disagree"
-              onClick={() => setPhase(PHASE.TERMINATED)}
-            >
+            <button className="consent-disagree" onClick={() => setPhase(PHASE.TERMINATED)}>
               I Disagree
             </button>
           </div>
@@ -735,81 +754,35 @@ export default function App() {
     );
   }
 
-  // ── TERMINATED ──
   if (phase === PHASE.TERMINATED) {
     return (
       <div className="page-bg">
         <div className="status-card">
           <div className="status-icon-wrap terminated-icon-wrap">
             <svg viewBox="0 0 24 24" fill="none" className="status-icon">
-              <circle
-                cx="12"
-                cy="12"
-                r="10"
-                stroke="#e53935"
-                strokeWidth="1.8"
-              />
-              <line
-                x1="4.5"
-                y1="4.5"
-                x2="19.5"
-                y2="19.5"
-                stroke="#e53935"
-                strokeWidth="1.8"
-                strokeLinecap="round"
-              />
+              <circle cx="12" cy="12" r="10" stroke="#e53935" strokeWidth="1.8"/>
+              <line x1="4.5" y1="4.5" x2="19.5" y2="19.5" stroke="#e53935" strokeWidth="1.8" strokeLinecap="round"/>
             </svg>
           </div>
           <h2 className="status-title">Survey Terminated</h2>
-          <p className="status-sub">
-            This survey is no longer accepting responses.
-          </p>
+          <p className="status-sub">This survey is no longer accepting responses.</p>
         </div>
       </div>
     );
   }
 
-  // ── Download helper ──
-  const handleDownload = () => {
-    if (!transcriptDL) return;
-    const blob = new Blob([transcriptDL.content], {
-      type: "text/plain;charset=utf-8",
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = transcriptDL.filename;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
-  // ── COMPLETE ──
   if (phase === PHASE.COMPLETE) {
     return (
       <div className="page-bg">
         <div className="status-card">
           <div className="status-icon-wrap complete-icon-wrap">
             <svg viewBox="0 0 24 24" fill="none" className="status-icon">
-              <circle
-                cx="12"
-                cy="12"
-                r="10"
-                stroke="#2e7d32"
-                strokeWidth="1.8"
-              />
-              <polyline
-                points="7,12.5 10.5,16 17,9"
-                stroke="#2e7d32"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
+              <circle cx="12" cy="12" r="10" stroke="#2e7d32" strokeWidth="1.8"/>
+              <polyline points="7,12.5 10.5,16 17,9" stroke="#2e7d32" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
             </svg>
           </div>
           <h2 className="status-title">Survey Completed</h2>
-          <p className="status-sub">
-            Thank you for your time. Your response has been recorded.
-          </p>
+          <p className="status-sub">Thank you for your time. Your response has been recorded.</p>
           {transcriptDL && (
             <button className="download-btn" onClick={handleDownload}>
               ⬇ Download Transcript
@@ -820,21 +793,30 @@ export default function App() {
     );
   }
 
-  // ── SURVEY ──
   if (phase !== PHASE.SURVEY) return null;
-  if (step >= FLOW.length) return null; // handled by flow engine → COMPLETE
+  if (step >= FLOW.length)   return null;
 
   const current = FLOW[step];
-  const ml = micLabel();
+  const ml      = micLabel();
 
   return (
     <div className="survey-bg">
-      {/* ── CAMERA STEP ── */}
+
+      {/* ── CAMERA ── */}
       {current.type === "camera" && (
         <div className="camera-screen">
           <div className="camera-q-box">
             <span className="q-label-small">Question</span>
-            <p className="camera-q-text">{current.question}</p>
+            {cameraDisplayText === "__loading__" ? (
+              <p className="camera-q-text">
+                <span className="dots-loader"><span /><span /><span /></span>
+              </p>
+            ) : (
+              <p className="camera-q-text">
+                {cameraDisplayText}
+                {cameraTyping && <span className="typing-cursor">▌</span>}
+              </p>
+            )}
           </div>
           <video ref={videoRef} autoPlay playsInline className="camera-video" />
           <div className="camera-status">
@@ -850,22 +832,24 @@ export default function App() {
         </div>
       )}
 
-      {/* ── VOICE STEP — chat UI ── */}
+      {/* ── VOICE — chat UI ── */}
       {current.type === "voice" && (
         <div className="chat-screen">
-          {/* Chat messages area */}
           <div className="chat-messages">
             {chatMessages.map((msg) => (
-              <ChatBubble key={msg.id} role={msg.role} text={msg.text} />
+              <ChatBubble
+                key={msg.id}
+                role={msg.role}
+                text={msg.text}
+                loading={!!msg.loading}
+                typewriter={!!msg.typewriter}
+                typewriterDuration={msg.typewriterDuration || 0}
+                typing={!!msg.typing}
+              />
             ))}
-            {/* Live typing bubble */}
-            {isTyping && typingText && (
-              <ChatBubble role="ai" text={typingText} typing />
-            )}
             <div ref={chatEndRef} />
           </div>
 
-          {/* Mic button pinned at bottom */}
           <div className="chat-input-area">
             <button
               className={`mic-btn ${ml.active ? "mic-active" : ""} ${micDisabled ? "mic-disabled" : ""}`}
@@ -877,20 +861,21 @@ export default function App() {
               {ml.active && <span className="mic-ring" />}
             </button>
             <p className="voice-hint">
-              {vs === VS.SPEAKING_Q && "AI is speaking…"}
-              {vs === VS.IDLE && "Tap the mic when you're ready"}
-              {vs === VS.RECORDING_MAIN && "Recording… tap again to stop"}
-              {vs === VS.PROCESSING_MAIN && "Hold on, processing that…"}
-              {vs === VS.SPEAKING_PROBE && "Listen to the follow-up…"}
-              {vs === VS.PROBE_READY && "Tap the mic to answer the follow-up"}
-              {vs === VS.RECORDING_PROBE && "Recording… tap again to stop"}
+              {vs === VS.SPEAKING_Q       && "AI is speaking…"}
+              {vs === VS.IDLE             && "Tap the mic when you're ready"}
+              {vs === VS.RECORDING_MAIN   && "Recording… tap again to stop"}
+              {vs === VS.PROCESSING_MAIN  && "Hold on, processing that…"}
+              {vs === VS.SPEAKING_PROBE   && "Listen to the follow-up…"}
+              {vs === VS.PROBE_READY      && "Tap the mic to answer the follow-up"}
+              {vs === VS.RECORDING_PROBE  && "Recording… tap again to stop"}
               {vs === VS.PROCESSING_PROBE && "Saving your response…"}
-              {vs === VS.ACKNOWLEDGING && "…"}
-              {vs === VS.DONE && "Moving on…"}
+              {vs === VS.ACKNOWLEDGING    && "…"}
+              {vs === VS.DONE             && "Moving on…"}
             </p>
           </div>
         </div>
       )}
+
     </div>
   );
 }
