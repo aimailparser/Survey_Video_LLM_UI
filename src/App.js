@@ -5,12 +5,12 @@ const BASE_URL = process.env.REACT_APP_BASE_URL;
 
 // ─── Phases ───────────────────────────────────────────────────────────────────
 const PHASE = {
-  AGE:       "age",
-  GENDER:    "gender",
-  CONSENT:   "consent",
-  TERMINATED:"terminated",
-  SURVEY:    "survey",
-  COMPLETE:  "complete",
+  AGE: "age",
+  GENDER: "gender",
+  CONSENT: "consent",
+  TERMINATED: "terminated",
+  SURVEY: "survey",
+  COMPLETE: "complete",
 };
 
 let sessionTranscript = [];
@@ -22,7 +22,8 @@ const WAITING_PHRASES = [
   "One moment, I'm taking this in…",
   "Just scanning what you've shown me…",
 ];
-const randomPhrase = () => WAITING_PHRASES[Math.floor(Math.random() * WAITING_PHRASES.length)];
+const randomPhrase = () =>
+  WAITING_PHRASES[Math.floor(Math.random() * WAITING_PHRASES.length)];
 
 // ─── Survey flow ──────────────────────────────────────────────────────────────
 const FLOW = [
@@ -57,16 +58,16 @@ const FLOW = [
 
 // ─── Voice state machine ──────────────────────────────────────────────────────
 const VS = {
-  IDLE:             "idle",
-  SPEAKING_Q:       "speaking_q",       // AI typing/speaking the question
-  RECORDING_MAIN:   "recording_main",
-  PROCESSING_MAIN:  "processing_main",
-  SPEAKING_PROBE:   "speaking_probe",
-  PROBE_READY:      "probe_ready",
-  RECORDING_PROBE:  "recording_probe",
+  IDLE: "idle",
+  SPEAKING_Q: "speaking_q", // AI typing/speaking the question
+  RECORDING_MAIN: "recording_main",
+  PROCESSING_MAIN: "processing_main",
+  SPEAKING_PROBE: "speaking_probe",
+  PROBE_READY: "probe_ready",
+  RECORDING_PROBE: "recording_probe",
   PROCESSING_PROBE: "processing_probe",
-  ACKNOWLEDGING:    "acknowledging",
-  DONE:             "done",
+  ACKNOWLEDGING: "acknowledging",
+  DONE: "done",
 };
 
 // ─── Typewriter hook ──────────────────────────────────────────────────────────
@@ -76,7 +77,11 @@ function useTypewriter(text, active, charDelay = 35) {
   const idxRef = useRef(0);
 
   useEffect(() => {
-    if (!active) { setDisplayed(""); idxRef.current = 0; return; }
+    if (!active) {
+      setDisplayed("");
+      idxRef.current = 0;
+      return;
+    }
     setDisplayed("");
     idxRef.current = 0;
     const interval = setInterval(() => {
@@ -107,111 +112,184 @@ function ChatBubble({ role, text, typing = false }) {
 
 export default function App() {
   // ── Refs ──────────────────────────────────────────────────────────────────
-  const videoRef          = useRef(null);
-  const streamRef         = useRef(null);
-  const speakingRef       = useRef(false);
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
+  const speakingRef = useRef(false);
   const streamIntervalRef = useRef(null);
-  const mediaRecorderRef  = useRef(null);
-  const audioChunksRef    = useRef([]);
-  const probeQuestionRef  = useRef("");
+  const mediaRecorderRef = useRef(null);
+  const audioChunksRef = useRef([]);
+  const probeQuestionRef = useRef("");
   const mainTranscriptRef = useRef("");
-  const vsRef             = useRef(VS.IDLE);
-  const lastHintRef       = useRef("");
-  const hintCooldownRef   = useRef(false);
-  const chatEndRef        = useRef(null);
+  const vsRef = useRef(VS.IDLE);
+  const lastHintRef = useRef("");
+  const hintCooldownRef = useRef(false);
+  const chatEndRef = useRef(null);
 
   // ── State ─────────────────────────────────────────────────────────────────
-  const [phase,         setPhase]        = useState(PHASE.AGE);
-  const [age,           setAge]          = useState("");
-  const [gender,        setGender]       = useState("");
-  const [step,          setStep]         = useState(0);
-  const [started,       setStarted]      = useState(false);
-  const [vs,            setVs]           = useState(VS.IDLE);
-  const [cameraStatus,  setCameraStatus] = useState("scanning");
-  const [transcriptDL,  setTranscriptDL] = useState(null);
+  const [phase, setPhase] = useState(PHASE.AGE);
+  const [age, setAge] = useState("");
+  const [gender, setGender] = useState("");
+  const [step, setStep] = useState(0);
+  const [started, setStarted] = useState(false);
+  const [vs, setVs] = useState(VS.IDLE);
+  const [cameraStatus, setCameraStatus] = useState("scanning");
+  const [transcriptDL, setTranscriptDL] = useState(null);
 
   // Chat messages: [{ role: "ai"|"user", text, id }]
-  const [chatMessages,  setChatMessages] = useState([]);
+  const [chatMessages, setChatMessages] = useState([]);
   // Text currently being typed by AI (for typewriter)
-  const [typingText,    setTypingText]   = useState("");
-  const [isTyping,      setIsTyping]     = useState(false);
+  const [typingText, setTypingText] = useState("");
+  const [isTyping, setIsTyping] = useState(false);
 
-  useEffect(() => { vsRef.current = vs; }, [vs]);
+  useEffect(() => {
+    vsRef.current = vs;
+  }, [vs]);
 
   // Auto-scroll chat to bottom
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [chatMessages, typingText]);
 
-  // ─── ADD AI CHAT MESSAGE (with typewriter synced to speech) ───────────────
-  // Returns a promise that resolves when both typing and speech are done
-  const speakAndType = useCallback((text, cb) => {
-    // Start typewriter
-    setTypingText(text);
-    setIsTyping(true);
+  // ─── VOICE HELPERS ───────────────────────────────────────────────────────
+  //
+  // Mobile Chrome / iOS Safari quirks we handle:
+  //   1. getVoices() returns [] on first call — must wait for onvoiceschanged
+  //      BUT onvoiceschanged never fires on iOS if voices were already loaded.
+  //      Fix: try immediately, fall back to event, fall back to timeout.
+  //   2. speechSynthesis pauses after ~15 s on Android Chrome (background tab).
+  //      Fix: setInterval keepalive that calls resume() every 10 s.
+  //   3. onend never fires on some Android Chrome versions.
+  //      Fix: estimate duration from word count and fire cb ourselves if
+  //      onend hasn't fired within that window.
+  //   4. Must call speechSynthesis.cancel() before speak() or it queues.
 
-    // Start speech
+  const keepaliveRef = useRef(null);
+
+  const startKeepalive = () => {
+    if (keepaliveRef.current) return;
+    keepaliveRef.current = setInterval(() => {
+      if (window.speechSynthesis.speaking) window.speechSynthesis.resume();
+    }, 10000);
+  };
+
+  const stopKeepalive = () => {
+    clearInterval(keepaliveRef.current);
+    keepaliveRef.current = null;
+  };
+
+  // Pick best available voice — prefers natural-sounding female voices
+  const pickVoice = () => {
+    const voices = window.speechSynthesis.getVoices();
+    return (
+      voices.find((v) => v.name === "Samantha") ||
+      voices.find((v) => v.name.includes("Google UK English Female")) ||
+      voices.find((v) => /female/i.test(v.name)) ||
+      voices.find((v) => v.name.includes("Zira")) ||
+      voices.find((v) => v.lang.startsWith("en")) ||
+      voices[0] ||
+      null
+    );
+  };
+
+  // Core speak — calls cb when done (or after estimated duration as fallback)
+  const doSpeak = useCallback((text, onDone) => {
     window.speechSynthesis.cancel();
     speakingRef.current = true;
-    const speech = new SpeechSynthesisUtterance(text);
-    speech.rate = 0.95;
+    startKeepalive();
 
-    const applyVoice = () => {
-      const voices = window.speechSynthesis.getVoices();
-      const chosen =
-        voices.find((v) => v.name.includes("Samantha"))                ||
-        voices.find((v) => v.name.includes("Google UK English Female")) ||
-        voices.find((v) => v.name.includes("Female"))                   ||
-        voices.find((v) => v.name.includes("Zira"))                     ||
-        voices[0];
-      if (chosen) speech.voice = chosen;
+    const utter = new SpeechSynthesisUtterance(text);
+    utter.rate = 0.92;
+    utter.pitch = 1;
+
+    const assignVoiceAndSpeak = () => {
+      const v = pickVoice();
+      if (v) utter.voice = v;
+
+      // Fallback timer — fires cb if onend never comes
+      // Estimate: ~130 words/min at rate 0.92 → ~145ms per word
+      const wordCount = text.trim().split(/\s+/).length;
+      const estimatedMs = Math.max(wordCount * 145 + 800, 2000);
+      let cbFired = false;
+
+      const fallback = setTimeout(() => {
+        if (!cbFired) {
+          cbFired = true;
+          speakingRef.current = false;
+          stopKeepalive();
+          onDone && onDone();
+        }
+      }, estimatedMs);
+
+      utter.onend = () => {
+        if (!cbFired) {
+          cbFired = true;
+          clearTimeout(fallback);
+          speakingRef.current = false;
+          stopKeepalive();
+          onDone && onDone();
+        }
+      };
+
+      utter.onerror = () => {
+        if (!cbFired) {
+          cbFired = true;
+          clearTimeout(fallback);
+          speakingRef.current = false;
+          stopKeepalive();
+          onDone && onDone();
+        }
+      };
+
+      window.speechSynthesis.speak(utter);
     };
 
-    speech.onend = () => {
-      speakingRef.current = false;
-      // Commit full text as a permanent bubble, stop typing cursor
-      setIsTyping(false);
-      setTypingText("");
-      setChatMessages((prev) => [...prev, { role: "ai", text, id: Date.now() }]);
-      cb && cb();
-    };
-
-    if (window.speechSynthesis.getVoices().length === 0) {
-      window.speechSynthesis.onvoiceschanged = () => { applyVoice(); window.speechSynthesis.speak(speech); };
+    // If voices already loaded → go immediately
+    if (window.speechSynthesis.getVoices().length > 0) {
+      assignVoiceAndSpeak();
     } else {
-      applyVoice();
-      window.speechSynthesis.speak(speech);
+      // Wait for voices, but also set a hard timeout in case event never fires
+      const voiceTimeout = setTimeout(assignVoiceAndSpeak, 500);
+      window.speechSynthesis.onvoiceschanged = () => {
+        clearTimeout(voiceTimeout);
+        window.speechSynthesis.onvoiceschanged = null;
+        assignVoiceAndSpeak();
+      };
     }
   }, []);
 
-  // Silent speak (no typewriter) — used for camera hints/confirmations
-  const speak = useCallback((text, cb) => {
-    window.speechSynthesis.cancel();
-    speakingRef.current = true;
-    const speech = new SpeechSynthesisUtterance(text);
-    speech.rate = 0.95;
-    const applyVoice = () => {
-      const voices = window.speechSynthesis.getVoices();
-      const chosen =
-        voices.find((v) => v.name.includes("Samantha"))                ||
-        voices.find((v) => v.name.includes("Google UK English Female")) ||
-        voices.find((v) => v.name.includes("Female"))                   ||
-        voices.find((v) => v.name.includes("Zira"))                     ||
-        voices[0];
-      if (chosen) speech.voice = chosen;
-    };
-    speech.onend = () => { speakingRef.current = false; cb && cb(); };
-    if (window.speechSynthesis.getVoices().length === 0) {
-      window.speechSynthesis.onvoiceschanged = () => { applyVoice(); window.speechSynthesis.speak(speech); };
-    } else {
-      applyVoice();
-      window.speechSynthesis.speak(speech);
-    }
-  }, []);
+  // speakAndType — speaks + shows typewriter bubble, commits on done
+  const speakAndType = useCallback(
+    (text, cb) => {
+      setTypingText(text);
+      setIsTyping(true);
+
+      doSpeak(text, () => {
+        setIsTyping(false);
+        setTypingText("");
+        setChatMessages((prev) => [
+          ...prev,
+          { role: "ai", text, id: Date.now() },
+        ]);
+        cb && cb();
+      });
+    },
+    [doSpeak],
+  );
+
+  // speak — silent speak for camera hints (no typewriter)
+  const speak = useCallback(
+    (text, cb) => {
+      doSpeak(text, cb);
+    },
+    [doSpeak],
+  );
 
   // Add a user bubble to chat
   const addUserBubble = (text) => {
-    setChatMessages((prev) => [...prev, { role: "user", text, id: Date.now() }]);
+    setChatMessages((prev) => [
+      ...prev,
+      { role: "user", text, id: Date.now() },
+    ]);
   };
 
   // ─── CAMERA ──────────────────────────────────────────────────────────────
@@ -222,7 +300,9 @@ export default function App() {
       });
       streamRef.current = stream;
       if (videoRef.current) videoRef.current.srcObject = stream;
-    } catch (err) { console.error("Camera error:", err); }
+    } catch (err) {
+      console.error("Camera error:", err);
+    }
   };
 
   const stopCamera = () => {
@@ -233,7 +313,8 @@ export default function App() {
 
   const capture = () => {
     const canvas = document.createElement("canvas");
-    canvas.width = 320; canvas.height = 240;
+    canvas.width = 320;
+    canvas.height = 240;
     canvas.getContext("2d").drawImage(videoRef.current, 0, 0, 320, 240);
     return canvas.toDataURL("image/jpeg");
   };
@@ -247,7 +328,7 @@ export default function App() {
       if (speakingRef.current || hintCooldownRef.current) return;
       try {
         const flowItem = FLOW[currentStep];
-        const res  = await fetch(`${BASE_URL}/analyze`, {
+        const res = await fetch(`${BASE_URL}/analyze`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -262,7 +343,10 @@ export default function App() {
           clearInterval(streamIntervalRef.current);
           streamIntervalRef.current = null;
           setCameraStatus("ok");
-          sessionTranscript.push({ question: flowItem.question, answer: data.transcriptAnswer });
+          sessionTranscript.push({
+            question: flowItem.question,
+            answer: data.transcriptAnswer,
+          });
 
           const confirmations = [
             "Perfect, got it! That's exactly what I needed to see.",
@@ -271,21 +355,30 @@ export default function App() {
             "Brilliant, I've got a good picture of that now.",
             "Oh nice, yeah I can see that clearly — perfect!",
           ];
-          const confirm = confirmations[Math.floor(Math.random() * confirmations.length)];
+          const confirm =
+            confirmations[Math.floor(Math.random() * confirmations.length)];
           speak(confirm, () => next());
           return;
         }
 
         retryCount++;
-        if (retryCount === 1) { speak(randomPhrase()); return; }
+        if (retryCount === 1) {
+          speak(randomPhrase());
+          return;
+        }
 
-        const hint = data.hint || "Could you adjust the camera a little so I can see better?";
+        const hint =
+          data.hint ||
+          "Could you adjust the camera a little so I can see better?";
         if (hint === lastHintRef.current) return;
         lastHintRef.current = hint;
         hintCooldownRef.current = true;
-        speak(hint, () => { hintCooldownRef.current = false; });
-
-      } catch (err) { console.error(err); }
+        speak(hint, () => {
+          hintCooldownRef.current = false;
+        });
+      } catch (err) {
+        console.error(err);
+      }
     }, 2500);
   };
 
@@ -301,24 +394,32 @@ export default function App() {
       audioChunksRef.current = [];
       const recorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
       mediaRecorderRef.current = recorder;
-      recorder.ondataavailable = (e) => { if (e.data.size > 0) audioChunksRef.current.push(e.data); };
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
       recorder.onstop = () => {
         stream.getTracks().forEach((t) => t.stop());
         onStop(new Blob(audioChunksRef.current, { type: "audio/webm" }));
       };
       recorder.start();
-    } catch (err) { console.error("Mic error:", err); }
+    } catch (err) {
+      console.error("Mic error:", err);
+    }
   };
 
   const stopRecording = () => {
-    if (mediaRecorderRef.current?.state === "recording") mediaRecorderRef.current.stop();
+    if (mediaRecorderRef.current?.state === "recording")
+      mediaRecorderRef.current.stop();
   };
 
   const transcribeBlob = async (blob, questionCtx) => {
     const fd = new FormData();
     fd.append("audio", blob, "answer.webm");
     fd.append("question", questionCtx || "");
-    const res = await fetch(`${BASE_URL}/transcribe`, { method: "POST", body: fd });
+    const res = await fetch(`${BASE_URL}/transcribe`, {
+      method: "POST",
+      body: fd,
+    });
     const { transcript } = await res.json();
     return transcript || "";
   };
@@ -337,16 +438,25 @@ export default function App() {
       startRecording(async (blob) => {
         setVs(VS.PROCESSING_PROBE);
         try {
-          const probeAnswer = await transcribeBlob(blob, probeQuestionRef.current);
+          const probeAnswer = await transcribeBlob(
+            blob,
+            probeQuestionRef.current,
+          );
           addUserBubble(probeAnswer);
-          sessionTranscript.push({ question: probeQuestionRef.current, answer: probeAnswer });
+          sessionTranscript.push({
+            question: probeQuestionRef.current,
+            answer: probeAnswer,
+          });
 
           await fetch(`${BASE_URL}/save-transcript`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               entries: [
-                { question: FLOW[step].question,      answer: mainTranscriptRef.current },
+                {
+                  question: FLOW[step].question,
+                  answer: mainTranscriptRef.current,
+                },
                 { question: probeQuestionRef.current, answer: probeAnswer },
               ],
             }),
@@ -358,7 +468,10 @@ export default function App() {
             const ackRes = await fetch(`${BASE_URL}/acknowledge`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ probeQuestion: probeQuestionRef.current, probeAnswer }),
+              body: JSON.stringify({
+                probeQuestion: probeQuestionRef.current,
+                probeAnswer,
+              }),
             });
             const ackData = await ackRes.json();
             ack = ackData.ack || ack;
@@ -368,13 +481,15 @@ export default function App() {
             setVs(VS.DONE);
             setTimeout(() => {
               setVs(VS.IDLE);
-              probeQuestionRef.current  = "";
+              probeQuestionRef.current = "";
               mainTranscriptRef.current = "";
               next();
             }, 400);
           });
-
-        } catch (err) { console.error(err); setVs(VS.PROBE_READY); }
+        } catch (err) {
+          console.error(err);
+          setVs(VS.PROBE_READY);
+        }
       });
       return;
     }
@@ -387,20 +502,28 @@ export default function App() {
           const transcript = await transcribeBlob(blob, FLOW[step].question);
           mainTranscriptRef.current = transcript;
           addUserBubble(transcript);
-          sessionTranscript.push({ question: FLOW[step].question, answer: transcript });
+          sessionTranscript.push({
+            question: FLOW[step].question,
+            answer: transcript,
+          });
 
           const probeRes = await fetch(`${BASE_URL}/probe`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ question: FLOW[step].question, answer: transcript }),
+            body: JSON.stringify({
+              question: FLOW[step].question,
+              answer: transcript,
+            }),
           });
           const { probe } = await probeRes.json();
           probeQuestionRef.current = probe;
 
           setVs(VS.SPEAKING_PROBE);
           speakAndType(probe, () => setVs(VS.PROBE_READY));
-
-        } catch (err) { console.error(err); setVs(VS.IDLE); }
+        } catch (err) {
+          console.error(err);
+          setVs(VS.IDLE);
+        }
       });
     }
   };
@@ -410,7 +533,7 @@ export default function App() {
     stopRealtimeValidation();
     stopCamera();
     setCameraStatus("scanning");
-    lastHintRef.current     = "";
+    lastHintRef.current = "";
     hintCooldownRef.current = false;
     setStep((s) => s + 1);
   };
@@ -424,12 +547,20 @@ export default function App() {
       fetch(`${BASE_URL}/save-transcript`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ age, gender, transcript: sessionTranscript, completedAt: new Date().toISOString() }),
+        body: JSON.stringify({
+          age,
+          gender,
+          transcript: sessionTranscript,
+          completedAt: new Date().toISOString(),
+        }),
       })
         .then((r) => r.json())
         .then((data) => {
           if (data.txtContent) {
-            setTranscriptDL({ content: data.txtContent, filename: data.filename });
+            setTranscriptDL({
+              content: data.txtContent,
+              filename: data.filename,
+            });
           }
         })
         .catch(console.error);
@@ -442,7 +573,7 @@ export default function App() {
     if (current.type === "voice") {
       setVs(VS.SPEAKING_Q);
       setChatMessages([]);
-      probeQuestionRef.current  = "";
+      probeQuestionRef.current = "";
       mainTranscriptRef.current = "";
       speakAndType(current.question, () => setVs(VS.IDLE));
     }
@@ -450,7 +581,7 @@ export default function App() {
     if (current.type === "camera") {
       setCameraStatus("scanning");
       speak(current.question, () =>
-        startCamera().then(() => startRealtimeValidation(step))
+        startCamera().then(() => startRealtimeValidation(step)),
       );
     }
   }, [step, started]);
@@ -458,26 +589,37 @@ export default function App() {
   // ─── MIC BUTTON LABEL ────────────────────────────────────────────────────
   const micLabel = () => {
     switch (vs) {
-      case VS.SPEAKING_Q:       return { icon: "🔊", text: "Listening…",    active: false };
-      case VS.IDLE:             return { icon: "🎙️", text: "Tap to Answer",  active: false };
-      case VS.RECORDING_MAIN:   return { icon: "⏹️", text: "Tap to Stop",    active: true  };
-      case VS.PROCESSING_MAIN:  return { icon: "⏳", text: "Thinking…",      active: false };
-      case VS.SPEAKING_PROBE:   return { icon: "🔊", text: "Listening…",     active: false };
-      case VS.PROBE_READY:      return { icon: "🎙️", text: "Tap to Answer",  active: false };
-      case VS.RECORDING_PROBE:  return { icon: "⏹️", text: "Tap to Stop",    active: true  };
-      case VS.PROCESSING_PROBE: return { icon: "⏳", text: "Saving…",        active: false };
-      case VS.ACKNOWLEDGING:    return { icon: "🔊", text: "Listening…",     active: false };
-      case VS.DONE:             return { icon: "✅", text: "Done!",          active: false };
-      default:                  return { icon: "🎙️", text: "Tap to Answer",  active: false };
+      case VS.SPEAKING_Q:
+        return { icon: "🔊", text: "Listening…", active: false };
+      case VS.IDLE:
+        return { icon: "🎙️", text: "Tap to Answer", active: false };
+      case VS.RECORDING_MAIN:
+        return { icon: "⏹️", text: "Tap to Stop", active: true };
+      case VS.PROCESSING_MAIN:
+        return { icon: "⏳", text: "Thinking…", active: false };
+      case VS.SPEAKING_PROBE:
+        return { icon: "🔊", text: "Listening…", active: false };
+      case VS.PROBE_READY:
+        return { icon: "🎙️", text: "Tap to Answer", active: false };
+      case VS.RECORDING_PROBE:
+        return { icon: "⏹️", text: "Tap to Stop", active: true };
+      case VS.PROCESSING_PROBE:
+        return { icon: "⏳", text: "Saving…", active: false };
+      case VS.ACKNOWLEDGING:
+        return { icon: "🔊", text: "Listening…", active: false };
+      case VS.DONE:
+        return { icon: "✅", text: "Done!", active: false };
+      default:
+        return { icon: "🎙️", text: "Tap to Answer", active: false };
     }
   };
 
   const micDisabled =
-    vs === VS.SPEAKING_Q       ||
-    vs === VS.PROCESSING_MAIN  ||
-    vs === VS.SPEAKING_PROBE   ||
+    vs === VS.SPEAKING_Q ||
+    vs === VS.PROCESSING_MAIN ||
+    vs === VS.SPEAKING_PROBE ||
     vs === VS.PROCESSING_PROBE ||
-    vs === VS.ACKNOWLEDGING    ||
+    vs === VS.ACKNOWLEDGING ||
     vs === VS.DONE;
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -498,7 +640,11 @@ export default function App() {
             type="number"
           />
           <div className="btn-row">
-            <button className="next-btn" disabled={!age} onClick={() => setPhase(PHASE.GENDER)}>
+            <button
+              className="next-btn"
+              disabled={!age}
+              onClick={() => setPhase(PHASE.GENDER)}
+            >
               Next
             </button>
           </div>
@@ -515,10 +661,14 @@ export default function App() {
           <h2 className="title">What is your gender?</h2>
           <div className="options-row">
             {["Male", "Female", "Other"].map((g) => (
-              <button key={g} className="option-btn" onClick={() => {
-                setGender(g);
-                setPhase(PHASE.CONSENT);
-              }}>
+              <button
+                key={g}
+                className="option-btn"
+                onClick={() => {
+                  setGender(g);
+                  setPhase(PHASE.CONSENT);
+                }}
+              >
                 {g}
               </button>
             ))}
@@ -536,8 +686,9 @@ export default function App() {
           <div className="consent-icon">🔒</div>
           <h2 className="title">Your Privacy Matters</h2>
           <p className="consent-body">
-            To continue with this study, we need to collect some personal information including
-            your responses, voice recordings, and camera footage of your workspace.
+            To continue with this study, we need to collect some personal
+            information including your responses, voice recordings, and camera
+            footage of your workspace.
           </p>
           <ul className="consent-list">
             <li>Your data will only be used for research purposes</li>
@@ -551,13 +702,23 @@ export default function App() {
             <button
               className="consent-agree"
               onClick={() => {
+                // Unlock audio context on iOS/Android — must happen inside a user gesture
+                window.speechSynthesis.cancel();
+                window.speechSynthesis.resume();
+                // Fire a silent 0-length utterance to warm up the engine on iOS
+                const warmup = new SpeechSynthesisUtterance(" ");
+                warmup.volume = 0;
+                window.speechSynthesis.speak(warmup);
+
                 sessionTranscript = [];
-                sessionTranscript.push({ question: "Age",    answer: age });
+                sessionTranscript.push({ question: "Age", answer: age });
                 sessionTranscript.push({ question: "Gender", answer: gender });
-                sessionTranscript.push({ question: "PII Consent", answer: "Agreed" });
+                sessionTranscript.push({
+                  question: "PII Consent",
+                  answer: "Agreed",
+                });
                 setStarted(true);
                 setPhase(PHASE.SURVEY);
-                window.speechSynthesis.resume();
               }}
             >
               I Agree
@@ -581,12 +742,28 @@ export default function App() {
         <div className="status-card">
           <div className="status-icon-wrap terminated-icon-wrap">
             <svg viewBox="0 0 24 24" fill="none" className="status-icon">
-              <circle cx="12" cy="12" r="10" stroke="#e53935" strokeWidth="1.8"/>
-              <line x1="4.5" y1="4.5" x2="19.5" y2="19.5" stroke="#e53935" strokeWidth="1.8" strokeLinecap="round"/>
+              <circle
+                cx="12"
+                cy="12"
+                r="10"
+                stroke="#e53935"
+                strokeWidth="1.8"
+              />
+              <line
+                x1="4.5"
+                y1="4.5"
+                x2="19.5"
+                y2="19.5"
+                stroke="#e53935"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+              />
             </svg>
           </div>
           <h2 className="status-title">Survey Terminated</h2>
-          <p className="status-sub">This survey is no longer accepting responses.</p>
+          <p className="status-sub">
+            This survey is no longer accepting responses.
+          </p>
         </div>
       </div>
     );
@@ -595,10 +772,12 @@ export default function App() {
   // ── Download helper ──
   const handleDownload = () => {
     if (!transcriptDL) return;
-    const blob = new Blob([transcriptDL.content], { type: "text/plain;charset=utf-8" });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement("a");
-    a.href     = url;
+    const blob = new Blob([transcriptDL.content], {
+      type: "text/plain;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
     a.download = transcriptDL.filename;
     a.click();
     URL.revokeObjectURL(url);
@@ -611,12 +790,26 @@ export default function App() {
         <div className="status-card">
           <div className="status-icon-wrap complete-icon-wrap">
             <svg viewBox="0 0 24 24" fill="none" className="status-icon">
-              <circle cx="12" cy="12" r="10" stroke="#2e7d32" strokeWidth="1.8"/>
-              <polyline points="7,12.5 10.5,16 17,9" stroke="#2e7d32" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+              <circle
+                cx="12"
+                cy="12"
+                r="10"
+                stroke="#2e7d32"
+                strokeWidth="1.8"
+              />
+              <polyline
+                points="7,12.5 10.5,16 17,9"
+                stroke="#2e7d32"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
             </svg>
           </div>
           <h2 className="status-title">Survey Completed</h2>
-          <p className="status-sub">Thank you for your time. Your response has been recorded.</p>
+          <p className="status-sub">
+            Thank you for your time. Your response has been recorded.
+          </p>
           {transcriptDL && (
             <button className="download-btn" onClick={handleDownload}>
               ⬇ Download Transcript
@@ -629,14 +822,13 @@ export default function App() {
 
   // ── SURVEY ──
   if (phase !== PHASE.SURVEY) return null;
-  if (step >= FLOW.length)   return null; // handled by flow engine → COMPLETE
+  if (step >= FLOW.length) return null; // handled by flow engine → COMPLETE
 
   const current = FLOW[step];
-  const ml      = micLabel();
+  const ml = micLabel();
 
   return (
     <div className="survey-bg">
-
       {/* ── CAMERA STEP ── */}
       {current.type === "camera" && (
         <div className="camera-screen">
@@ -644,12 +836,7 @@ export default function App() {
             <span className="q-label-small">Question</span>
             <p className="camera-q-text">{current.question}</p>
           </div>
-          <video
-            ref={videoRef}
-            autoPlay
-            playsInline
-            className="camera-video"
-          />
+          <video ref={videoRef} autoPlay playsInline className="camera-video" />
           <div className="camera-status">
             {cameraStatus === "scanning" ? (
               <span className="scanning-dot-wrap">
@@ -666,7 +853,6 @@ export default function App() {
       {/* ── VOICE STEP — chat UI ── */}
       {current.type === "voice" && (
         <div className="chat-screen">
-
           {/* Chat messages area */}
           <div className="chat-messages">
             {chatMessages.map((msg) => (
@@ -691,22 +877,20 @@ export default function App() {
               {ml.active && <span className="mic-ring" />}
             </button>
             <p className="voice-hint">
-              {vs === VS.SPEAKING_Q       && "AI is speaking…"}
-              {vs === VS.IDLE             && "Tap the mic when you're ready"}
-              {vs === VS.RECORDING_MAIN   && "Recording… tap again to stop"}
-              {vs === VS.PROCESSING_MAIN  && "Hold on, processing that…"}
-              {vs === VS.SPEAKING_PROBE   && "Listen to the follow-up…"}
-              {vs === VS.PROBE_READY      && "Tap the mic to answer the follow-up"}
-              {vs === VS.RECORDING_PROBE  && "Recording… tap again to stop"}
+              {vs === VS.SPEAKING_Q && "AI is speaking…"}
+              {vs === VS.IDLE && "Tap the mic when you're ready"}
+              {vs === VS.RECORDING_MAIN && "Recording… tap again to stop"}
+              {vs === VS.PROCESSING_MAIN && "Hold on, processing that…"}
+              {vs === VS.SPEAKING_PROBE && "Listen to the follow-up…"}
+              {vs === VS.PROBE_READY && "Tap the mic to answer the follow-up"}
+              {vs === VS.RECORDING_PROBE && "Recording… tap again to stop"}
               {vs === VS.PROCESSING_PROBE && "Saving your response…"}
-              {vs === VS.ACKNOWLEDGING    && "…"}
-              {vs === VS.DONE             && "Moving on…"}
+              {vs === VS.ACKNOWLEDGING && "…"}
+              {vs === VS.DONE && "Moving on…"}
             </p>
           </div>
-
         </div>
       )}
-
     </div>
   );
 }
